@@ -28,7 +28,6 @@ class PositionalEncoding(nn.Module):
         Ritorna x + positional encoding (stessa shape).
         """
         seq_len = x.size(1)
-        # somma “in place” i vettori di posizione
         x = x + self.pe[:, :seq_len, :].to(x.device)
         return x
 
@@ -37,11 +36,10 @@ class PositionalEncoding(nn.Module):
 ################################
 class MiniTransformer(nn.Module):
     """
-    Esempio di Transformer con:
-     - 2 strati di TransformerEncoder (num_layers=2) e dropout=0.1
-     - LayerNorm al posto di BatchNorm
-     - Pooling mean + max
-    L'output finale avrà dimensione 2*d_model (perché concat mean e max).
+    TransformerEncoder con:
+     - 2 strati (num_layers=2), dropout=0.1
+     - LayerNorm finale
+     - mean+max pooling => output shape = 2*d_model (quindi 64 se d_model=32).
     """
     def __init__(self, d_input=25, d_model=32, nhead=4, num_layers=2, dim_feedforward=64, dropout=0.1):
         super().__init__()
@@ -58,24 +56,21 @@ class MiniTransformer(nn.Module):
             d_model=d_model,
             nhead=nhead,
             dim_feedforward=dim_feedforward,
-            dropout=dropout,            # dropout su attention e FC
+            dropout=dropout,  # dropout su attention e FC
             activation='relu',
-            batch_first=False          # PyTorch 1.12+ consente batch_first=True, ma qui usiamo False
+            batch_first=False
         )
         self.transformer_encoder = nn.TransformerEncoder(
-            encoder_layer, num_layers=num_layers
+            encoder_layer,
+            num_layers=num_layers
         )
 
         # LayerNorm finale sulla sequenza
         self.layernorm = nn.LayerNorm(d_model)
 
-        # Nota: rimuoviamo la BN su (batch_size, d_model)
-        #       e usiamo solo LayerNorm nel flusso
-        # -> Niente self.bn = nn.BatchNorm1d(d_model)
-
     def forward(self, x):
         """
-        x: shape (B, seq_len, d_input)
+        x: (B, seq_len, d_input)
         Ritorna un embedding di dimensione 2*d_model (mean+max pooling).
         """
         b, s, d = x.shape
@@ -86,33 +81,35 @@ class MiniTransformer(nn.Module):
         # (2) Aggiunta del positional encoding
         x = self.pos_encoder(x)   # (B, s, d_model)
 
-        # (3) Pytorch transformer richiede shape (s, B, d_model) se batch_first=False
+        # (3) Il TransformerEncoder, con batch_first=False, vuole (s, B, d_model)
         x = x.transpose(0, 1)     # (s, B, d_model)
 
         # (4) Passiamo i dati nel TransformerEncoder
         out = self.transformer_encoder(x)  # (s, B, d_model)
 
-        # (5) Ritorniamo a (B, s, d_model)
+        # (5) Torniamo a (B, s, d_model)
         out = out.transpose(0, 1)
 
-        # (6) LayerNorm lungo la dimensione d_model
+        # (6) LayerNorm sul canale d_model
         out = self.layernorm(out)
 
-        # (7) Mean + Max pooling lungo seq_len
+        # (7) Mean + Max pooling sul seq_len
         mean_pool = out.mean(dim=1)        # (B, d_model)
         max_pool, _ = out.max(dim=1)       # (B, d_model)
         seq_embed = torch.cat([mean_pool, max_pool], dim=1)  # (B, 2*d_model)
 
         return seq_embed
 
+
 ################################
-# ClassificationHead con uno strato nascosto
+# ClassificationHead
 ################################
 class ClassificationHead(nn.Module):
     """
     MLP a 2 layer:
      - FC(2*d_model, hidden) + ReLU + Dropout
      - FC(hidden, n_classes)
+    d_in=64 se d_model=32 e usiamo mean+max pooling.
     """
     def __init__(self, d_in=64, n_classes=10, hidden=64, dropout=0.1):
         super().__init__()
@@ -136,10 +133,10 @@ class ClassificationHead(nn.Module):
 ################################
 class DPVaDE(nn.Module):
     """
-    VAE con prior GMM (VaDE), con passaggio a LayerNorm al posto di BatchNorm.
-    Rimane invariata la logica, ma sostituiamo i nn.BatchNorm1d con nn.LayerNorm.
+    VaDE (VAE con prior GMM), usando LayerNorm invece di BatchNorm.
+    Ora input_dim=64 (se la rete produce 2*d_model=64).
     """
-    def __init__(self, input_dim=32, latent_dim=16, hidden_dim=64,
+    def __init__(self, input_dim=64, latent_dim=16, hidden_dim=64,
                  n_components=9, alpha_new=1e-3):
         super().__init__()
         self.latent_dim = latent_dim
@@ -168,7 +165,7 @@ class DPVaDE(nn.Module):
 
     def encode(self, x):
         """
-        x: (B, input_dim)
+        x: (B, input_dim=64)
         """
         h = self.enc_fc1(x)
         h = torch.relu(h)
