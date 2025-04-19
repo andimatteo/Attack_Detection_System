@@ -1,2 +1,5 @@
 data/
 .venv
+src/transformer_dp_vade/__pycache__
+src/transformer_dp_vade/checkpoints
+src/transformer_dp_vade/runs

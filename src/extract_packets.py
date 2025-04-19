@@ -5,9 +5,10 @@ import pandas as pd
 import os
 import sys
 import math
+import zlib
 
 # =============================================================================
-# 1) FUNZIONI DI CONVERSIONE SICURA (per evitare errori “invalid literal for int() with base 10: 'False'”)
+# 1) FUNZIONI DI CONVERSIONE SICURA
 # =============================================================================
 def safe_int(value, default=0):
     """
@@ -68,18 +69,17 @@ def safe_float(value, default=0.0):
 
 
 # =============================================================================
-# 2) FUNZIONI UTILI PER CALCOLARE ENTROPIA E ZERO-RATIO DAL PAYLOAD
+# 2) FUNZIONI UTILI PER CALCOLARE ENTROPIA, ZERO-RATIO, ETC. DAL PAYLOAD
 # =============================================================================
 def hex_string_to_bytes(hex_str):
     """
     Converte una stringa esadecimale (es. 'abcd1234') in bytes grezzi (b'...').
     Ignora eventuali separatori tipo ':' se presenti.
     """
-    # Rimuove caratteri non validi, come ':'
     filtered = "".join(c for c in hex_str if c in "0123456789abcdefABCDEF")
     if len(filtered) % 2 != 0:
-        # Se lunghezza dispari, tronca un nibble (caso raro)
-        filtered = filtered[:-1]
+        # Qui preferiamo fare un 'pad' a sinistra di '0', invece che troncare.
+        filtered = '0' + filtered
     try:
         return bytes.fromhex(filtered)
     except ValueError:
@@ -87,14 +87,12 @@ def hex_string_to_bytes(hex_str):
 
 def payload_entropy(hex_payload):
     """
-    Calcola l'entropia di Shannon del payload a partire da una stringa esadecimale.
-    Se non valido o vuoto, restituisce 0.0.
+    Calcola l'entropia di Shannon del payload (stringa esadecimale).
     """
     raw = hex_string_to_bytes(hex_payload)
     if len(raw) == 0:
         return 0.0
 
-    # Conta la frequenza di ogni byte [0..255]
     freq = [0]*256
     for b in raw:
         freq[b] += 1
@@ -116,6 +114,28 @@ def payload_zero_ratio(hex_payload):
         return 0.0
     zero_count = raw.count(0)
     return zero_count / float(len(raw))
+
+def payload_ascii_ratio(hex_payload):
+    """
+    Ritorna la frazione (0..1) di byte “stampabili” (ASCII 32..126) sul totale del payload.
+    """
+    raw = hex_string_to_bytes(hex_payload)
+    if len(raw) == 0:
+        return 0.0
+    ascii_count = sum(1 for b in raw if 32 <= b <= 126)
+    return ascii_count / float(len(raw))
+
+def payload_compress_ratio(hex_payload):
+    """
+    Indica la 'complessità' dei dati come rapporto compressione = len(zlib(payload)) / len(payload).
+    Più è vicino a 1, più il payload è già 'incomprensibile' (o molto breve).
+    Se == 0 (teoricamente), significa ultra-comprimibile. Se payload è vuoto, restituiamo 1.0.
+    """
+    raw = hex_string_to_bytes(hex_payload)
+    if len(raw) == 0:
+        return 1.0
+    compressed = zlib.compress(raw, level=1)  # livello 1 = compressione rapida
+    return len(compressed) / len(raw)
 
 
 # =============================================================================
@@ -141,39 +161,36 @@ class_mapping = {
 def extract_features(packet):
     """
     Estrae 25 caratteristiche “allo stato dell’arte” da un singolo pacchetto:
-    1) proto_number         (es. 6 = TCP, 17 = UDP, 1 = ICMP, 0 = altrimenti)
-    2) total_length         (packet.length)
-    3) captured_length      (packet.captured_length)
-    4) ip_ttl               (se IP)
-    5) ip_flags             (in base 16 o int)
-    6) ip_frag_offset       (se disponibile)
-    7) tcp_flags            (bitmask combinata su 6 bit: URG, ACK, PSH, RST, SYN, FIN)
-    8) ack_flag             (1/0)
-    9) syn_flag             (1/0)
-    10) fin_flag            (1/0)
-    11) rst_flag            (1/0)
-    12) psh_flag            (1/0)
-    13) urg_flag            (1/0)
-    14) ack_number          (safe_int)
-    15) seq_number          (safe_int)
-    16) window_size         (safe_int)
-    17) src_port            (TCP/UDP)
-    18) dst_port            (TCP/UDP)
-    19) icmp_type           (se ICMP)
-    20) icmp_code           (se ICMP)
-    21) transport_payload_length (tcp.len o udp.length, altrimenti 0)
-    22) time_delta          (frame o tcp time_delta)
-    23) payload_entropy     (entropia del payload L4 in esadecimale)
-    24) payload_zero_ratio  (% byte = 0)
-    25) proto_count         (numero protocolli nel frame_info, de-duplicati)
-
-    => + la colonna 'class'
+      1) proto_number         (es. 6 = TCP, 17 = UDP, 1 = ICMP, 0 = altrimenti)
+      2) total_length         (packet.length)
+      3) ip_ttl               (se IP, altrimenti 0)
+      4) ip_flags             (safe conversion da stringa hex es. '0x4000')
+      5) ip_frag_offset       (offset di frammentazione)
+      6) tcp_flags            (bitmask su URG(32), ACK(16), PSH(8), RST(4), SYN(2), FIN(1))
+      7) ack_flag             (1/0)
+      8) syn_flag             (1/0)
+      9) fin_flag             (1/0)
+      10) rst_flag            (1/0)
+      11) psh_flag            (1/0)
+      12) urg_flag            (1/0)
+      13) ack_number          (safe_int)
+      14) seq_number          (safe_int)
+      15) window_size         (safe_int)
+      16) src_port            (TCP/UDP)
+      17) dst_port            (TCP/UDP)
+      18) icmp_type           (se ICMP)
+      19) icmp_code           (se ICMP)
+      20) transport_payload_length (tcp.len o udp.length, altrimenti 0)
+      21) time_delta          (frame o tcp time_delta)
+      22) payload_entropy     (entropia del payload L4 in esadecimale)
+      23) payload_zero_ratio  (% di byte = 0)
+      24) payload_ascii_ratio (frazione di byte stampabili vs tot)
+      25) payload_compress_ratio (rapporto di compressione zlib, 1 => “difficile” da comprimere)
     """
     try:
         features = {}
-        
+
         # 1) proto_number
-        #    Proviamo a prendere ip.proto (se c'è), altrimenti 0
         proto_num = 0
         if hasattr(packet, 'ip') and hasattr(packet.ip, 'proto'):
             proto_num = safe_int(packet.ip.proto, 0)
@@ -183,21 +200,15 @@ def extract_features(packet):
         pkt_len = safe_int(getattr(packet, 'length', 0))
         features['total_length'] = pkt_len
 
-        # 3) captured_length
-        cap_len = safe_int(getattr(packet, 'captured_length', 0))
-        features['captured_length'] = cap_len
-
-        # 4) ip_ttl
+        # 3) ip_ttl
         ip_ttl = 0
         if hasattr(packet, 'ip') and hasattr(packet.ip, 'ttl'):
             ip_ttl = safe_int(packet.ip.ttl, 0)
         features['ip_ttl'] = ip_ttl
 
-        # 5) ip_flags
+        # 4) ip_flags
         ip_flags = 0
         if hasattr(packet, 'ip') and hasattr(packet.ip, 'flags'):
-            # ip.flags può essere '0xXXXX' -> safe_int su base 16
-            # Oppure direttamente un numero -> safe_int standard
             val = packet.ip.flags
             if val.startswith('0x'):
                 try:
@@ -208,60 +219,37 @@ def extract_features(packet):
                 ip_flags = safe_int(val, 0)
         features['ip_flags'] = ip_flags
 
-        # 6) ip_frag_offset
+        # 5) ip_frag_offset
         ip_frag_off = 0
         if hasattr(packet, 'ip') and hasattr(packet.ip, 'frag_offset'):
             ip_frag_off = safe_int(packet.ip.frag_offset, 0)
         features['ip_frag_offset'] = ip_frag_off
 
-        # 7) tcp_flags (bitmask): URG(32), ACK(16), PSH(8), RST(4), SYN(2), FIN(1)
+        # Campi che useremo per calcolare i flags
         tcp_flags_bitmask = 0
-        # 8..13) singoli flag
         ack_flag, syn_flag, fin_flag, rst_flag, psh_flag, urg_flag = 0,0,0,0,0,0
-
-        # 14) ack_number
-        ack_number = 0
-        # 15) seq_number
-        seq_number = 0
-        # 16) window_size
-        window_size = 0
-
-        # 17) src_port
-        src_port = 0
-        # 18) dst_port
-        dst_port = 0
-
-        # 19) icmp_type
-        icmp_type = 0
-        # 20) icmp_code
-        icmp_code = 0
-
-        # 21) transport_payload_length (tcp.len o udp.length)
+        ack_number, seq_number, window_size = 0,0,0
+        src_port, dst_port = 0,0
+        icmp_type, icmp_code = 0,0
         transport_payload_len = 0
 
-        # 23) payload_entropy
-        # 24) payload_zero_ratio
+        # payload
         pay_entropy = 0.0
         pay_zero_ratio = 0.0
+        pay_ascii_ratio = 0.0
+        pay_compress_ratio = 1.0
 
-        # Verifica protocolli
+        # Controlla protocolli di trasporto
         if hasattr(packet, 'tcp'):
-            # -------- TCP ----------
-            # ack_flag
+            # TCP flags
             ack_flag = safe_int(getattr(packet.tcp, 'flags_ack', 0))
-            # syn_flag
             syn_flag = safe_int(getattr(packet.tcp, 'flags_syn', 0))
-            # fin_flag
             fin_flag = safe_int(getattr(packet.tcp, 'flags_fin', 0))
-            # rst_flag
             rst_flag = safe_int(getattr(packet.tcp, 'flags_reset', 0))
-            # psh_flag
             psh_flag = safe_int(getattr(packet.tcp, 'flags_push', 0))
-            # urg_flag
             urg_flag = safe_int(getattr(packet.tcp, 'flags_urg', 0))
 
-            # Costruiamo la bitmask
-            # URG(32), ACK(16), PSH(8), RST(4), SYN(2), FIN(1)
+            # Bitmask
             tcp_flags_bitmask = (
                 (urg_flag << 5) |
                 (ack_flag << 4) |
@@ -270,54 +258,50 @@ def extract_features(packet):
                 (syn_flag << 1) |
                 (fin_flag)
             )
-
-            # ack_number / seq_number
+            # Numeri di seq/ack, window
             ack_number = safe_int(getattr(packet.tcp, 'ack', 0))
             seq_number = safe_int(getattr(packet.tcp, 'seq', 0))
-
-            # window_size
             window_size = safe_int(getattr(packet.tcp, 'window_size_value', 0))
 
-            # porte
+            # Porte
             src_port = safe_int(getattr(packet.tcp, 'srcport', 0))
             dst_port = safe_int(getattr(packet.tcp, 'dstport', 0))
 
-            # lunghezza payload tcp
+            # Payload
             transport_payload_len = safe_int(getattr(packet.tcp, 'len', 0))
-
-            # payload in esadecimale => packet.tcp.payload
             hex_payload = getattr(packet.tcp, 'payload', None)
             if hex_payload:
                 pay_entropy = payload_entropy(hex_payload)
                 pay_zero_ratio = payload_zero_ratio(hex_payload)
+                pay_ascii_ratio = payload_ascii_ratio(hex_payload)
+                pay_compress_ratio = payload_compress_ratio(hex_payload)
 
         elif hasattr(packet, 'udp'):
-            # -------- UDP ----------
+            # UDP
             src_port = safe_int(getattr(packet.udp, 'srcport', 0))
             dst_port = safe_int(getattr(packet.udp, 'dstport', 0))
-            # In molti .pcap, udp.length è la dimensione del payload + header UDP (8 byte)
             transport_payload_len = safe_int(getattr(packet.udp, 'length', 0))
 
-            # payload
             hex_payload = getattr(packet.udp, 'payload', None)
             if hex_payload:
                 pay_entropy = payload_entropy(hex_payload)
                 pay_zero_ratio = payload_zero_ratio(hex_payload)
+                pay_ascii_ratio = payload_ascii_ratio(hex_payload)
+                pay_compress_ratio = payload_compress_ratio(hex_payload)
 
         elif hasattr(packet, 'icmp'):
-            # -------- ICMP ----------
+            # ICMP
             icmp_type = safe_int(getattr(packet.icmp, 'type', 0))
             icmp_code = safe_int(getattr(packet.icmp, 'code', 0))
-            # In alcuni casi c'è anche icmp.ident, icmp.seq
-            # Non sempre c'è un field length. Lo settiamo a 0
-            # Se vuoi, puoi provare `getattr(packet.icmp, 'payload', None)`
 
             hex_payload = getattr(packet.icmp, 'payload', None)
             if hex_payload:
                 pay_entropy = payload_entropy(hex_payload)
                 pay_zero_ratio = payload_zero_ratio(hex_payload)
+                pay_ascii_ratio = payload_ascii_ratio(hex_payload)
+                pay_compress_ratio = payload_compress_ratio(hex_payload)
 
-        # 22) time_delta (usiamo frame_info se tcp.time_delta non c’è)
+        # 21) time_delta (usa tcp.time_delta se c'è, altrimenti frame_info.time_delta)
         time_delta = 0.0
         if hasattr(packet, 'tcp') and hasattr(packet.tcp, 'time_delta'):
             time_delta = safe_float(packet.tcp.time_delta, 0.0)
@@ -325,19 +309,7 @@ def extract_features(packet):
             if hasattr(packet, 'frame_info') and hasattr(packet.frame_info, 'time_delta'):
                 time_delta = safe_float(packet.frame_info.time_delta, 0.0)
 
-        # 25) proto_count = numero protocolli nel frame_info
-        proto_count = 0
-        if hasattr(packet, 'frame_info') and hasattr(packet.frame_info, 'protocols'):
-            splitted = set(packet.frame_info.protocols.split(':'))
-            proto_count = len(splitted)
-
-        # Ora salviamo tutto nel dizionario
-        features['proto_number'] = proto_num
-        features['total_length'] = pkt_len
-        features['captured_length'] = cap_len
-        features['ip_ttl'] = ip_ttl
-        features['ip_flags'] = ip_flags
-        features['ip_frag_offset'] = ip_frag_off
+        # Assegnazione finale
         features['tcp_flags'] = tcp_flags_bitmask
         features['ack_flag'] = ack_flag
         features['syn_flag'] = syn_flag
@@ -352,11 +324,12 @@ def extract_features(packet):
         features['dst_port'] = dst_port
         features['icmp_type'] = icmp_type
         features['icmp_code'] = icmp_code
-        features['transport_payload_len'] = transport_payload_len
+        features['transport_payload_length'] = transport_payload_len
         features['time_delta'] = time_delta
         features['payload_entropy'] = pay_entropy
         features['payload_zero_ratio'] = pay_zero_ratio
-        features['proto_count'] = proto_count
+        features['payload_ascii_ratio'] = pay_ascii_ratio
+        features['payload_compress_ratio'] = pay_compress_ratio
 
         return features
 
@@ -366,7 +339,7 @@ def extract_features(packet):
 
 
 # =============================================================================
-# 5) FUNZIONE PER PROCESSARE IL PCAP E SALVARE TUTTO IN CSV
+# 5) FUNZIONE PER PROCESSARE IL PCAPNG E SALVARE TUTTO IN CSV
 # =============================================================================
 def process_pcapng(file_path, class_label, output_file):
     """
@@ -381,12 +354,12 @@ def process_pcapng(file_path, class_label, output_file):
     for packet in cap:
         features = extract_features(packet)
         if features:
-            # Aggiunta colonna 'class'
+            # Aggiungiamo la label
             features['class'] = class_label
             data.append(features)
 
         packet_count += 1
-        # Scrittura intermedia ogni 1000 pacchetti per limitare l'uso di RAM
+        # Scrittura intermedia ogni 1000 pacchetti
         if packet_count % 1000 == 0:
             print(f"\t\t{packet_count} pacchetti elaborati...")
             pd.DataFrame(data).to_csv(
@@ -414,7 +387,7 @@ def process_pcapng(file_path, class_label, output_file):
 # 6) MAIN
 # =============================================================================
 def main(input_folder, output_file):
-    # Se esiste già, lo cancelliamo
+    # Se il file esiste già, lo cancello
     if os.path.exists(output_file):
         os.remove(output_file)
 
